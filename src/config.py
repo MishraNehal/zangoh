@@ -25,6 +25,11 @@ class Settings:
     api_port: int
     streamlit_host: str
     streamlit_port: int
+    # Voice enhancement fields default so existing call sites (and tests) that
+    # construct Settings without them keep working unchanged.
+    stt_model: str = "whisper-large-v3-turbo"
+    stt_api_key: str = ""
+    tts_voice: str = "en-US-AriaNeural"
 
 
 def load_settings() -> Settings:
@@ -50,4 +55,10 @@ def load_settings() -> Settings:
         api_port=int(os.getenv("API_PORT", "8000")),
         streamlit_host=os.getenv("STREAMLIT_HOST", "127.0.0.1"),
         streamlit_port=int(os.getenv("STREAMLIT_PORT", "8501")),
+        # Voice enhancement (mid-session requirement). STT_API_KEY defaults to
+        # empty so the adapter falls back to LLM_API_KEY -- both point at the
+        # same Groq account unless a reviewer wants to separate them.
+        stt_model=os.getenv("STT_MODEL", "whisper-large-v3-turbo"),
+        stt_api_key=os.getenv("STT_API_KEY", ""),
+        tts_voice=os.getenv("TTS_VOICE", "en-US-AriaNeural"),
     )
