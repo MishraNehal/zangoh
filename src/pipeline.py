@@ -9,7 +9,7 @@ from src.models import ChatResponse
 from src.rag.retriever import KnowledgeRetriever
 from src.sessions.store import SessionStore
 from src.tools.ticket_tool import TicketRepository
-from src.utils.errors import ComponentNotReadyError
+from src.utils.errors import AgentProcessingError, ComponentNotReadyError
 
 
 class SupportPipeline:
@@ -26,37 +26,54 @@ class SupportPipeline:
 
     async def initialize(self) -> None:
         """Initialize shared components once during FastAPI startup."""
-        # The order is intentional: retrieval must be ready before a workflow
-        # capable of accepting traffic is exposed. If either step fails, leave
-        # ``ready`` false and let the FastAPI lifespan fail clearly.
         await self.retriever.initialize()
-        self.workflow = build_support_workflow(self.model)
+        self.workflow = build_support_workflow(
+            self.model, self.retriever, self.sessions, self.tickets
+        )
         self.ready = True
 
     async def process(self, session_id: str, message: str) -> ChatResponse:
-        # TODO: Bind one complete customer turn.
-        #
-        # INPUT
-        # - Strip boundary whitespace and reject blank IDs/messages.
-        # - Obtain one isolated ConversationState from ``self.sessions``.
-        # - Append the customer turn without discarding earlier valid state.
-        #
-        # WORKFLOW INVOCATION
-        # - Build the typed initial SupportWorkflowState.
-        # - Supply retriever/session/tool dependencies through an explicit
-        #   runtime context, closures, or documented graph configuration.
-        # - Await ``workflow.ainvoke``; do not call synchronous network work on
-        #   the event loop.
-        # - Preserve session state when a recoverable downstream call fails.
-        #
-        # OUTPUT
-        # - Validate the workflow result before constructing ChatResponse.
-        # - Require a non-empty customer-facing response.
-        # - Include only source filenames used for this answer.
-        # - Include a ticket ID only when the repository contains that ticket.
-        # - Append the successful assistant turn to conversation history.
-        # - Convert known provider/retrieval failures to AgentProcessingError.
-        # - Never expose prompts, secrets, stack traces, or filesystem paths.
         if not self.ready or self.workflow is None:
             raise ComponentNotReadyError("Support pipeline is not ready")
-        raise NotImplementedError
+
+        session_id = (session_id or "").strip()
+        message = (message or "").strip()
+        if not session_id or not message:
+            raise AgentProcessingError("session_id and message must not be blank")
+
+        session = self.sessions.get_or_create(session_id)
+        session.history.append({"role": "user", "content": message})
+
+        initial_state = {
+            "session_id": session_id,
+            "customer_message": message,
+        }
+
+        try:
+            result = await self.workflow.ainvoke(initial_state)
+        except AgentProcessingError:
+            raise
+        except ComponentNotReadyError:
+            raise
+        except Exception as exc:
+            raise AgentProcessingError(f"Failed to process message: {exc}") from exc
+
+        response_text = result.get("response_text")
+        if not response_text:
+            raise AgentProcessingError("Workflow returned an empty response")
+
+        ticket_id = result.get("ticket_id")
+        if ticket_id and self.tickets.get(ticket_id) is None:
+            ticket_id = None
+
+        sources = result.get("sources") or []
+
+        session.history.append({"role": "assistant", "content": response_text})
+
+        return ChatResponse(
+            success=True,
+            session_id=session_id,
+            response=response_text,
+            sources=sources,
+            ticket_id=ticket_id,
+        )
